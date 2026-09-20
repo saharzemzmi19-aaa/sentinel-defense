@@ -1,0 +1,72 @@
+server:
+  host: 0.0.0.0
+  port: 8081
+
+decision:
+  block_at: 0.75
+  escalate_at: 0.40
+  hard_block_confidence: 0.95
+  policy_block_confidence: 0.85
+  escalate_confidence: 0.65
+  allow_confidence: 0.80
+
+provenance:
+  untrusted_levels:
+    - untrusted_internal
+    - untrusted_external
+    - adversary_controlled
+  adversary_levels:
+    - adversary_controlled
+
+data_flow:
+  sensitive_levels:
+    - confidential
+    - restricted
+  # Source types that are not authoritative for consequential actions
+  non_authoritative_source_types:
+    - email
+    - document
+    - wiki
+    - ticket
+    - log
+    - intel
+    - alert
+    - tool_output
+    - memory
+
+canary:
+  encodings:
+    - plain
+    - spaced
+    - base64
+    - hex
+    - reversed
+
+sink:
+  external_communication:
+    - email_send
+    - email_draft
+    - slack_send
+    - webhook_post
+    - http_post
+  financial_execution:
+    - payment_execute
+    - payment_confirm
+    - wire_transfer
+    - payment_submit
+  state_changing:
+    - ticket_update
+    - incident_update
+    - case_update
+    - config_update
+    - firewall_update
+    - host_isolate
+  security_config:
+    - monitoring_disable
+    - alert_suppress
+    - log_disable
+    - rule_delete
+  memory_persistence:
+    - memory_write
+    - knowledge_save
+    - note_save

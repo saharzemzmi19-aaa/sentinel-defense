@@ -1,0 +1,26 @@
+# Generic policy rules for the Phase 1 defense.
+# These rules are evaluated by the policy engine.
+# DO NOT put scenario names, attack names, or specific tool names here
+# that are not already in config/defense.yaml.
+
+rules:
+  # Minimum overlap (chars) to consider action text as derived from a source
+  min_overlap_chars: 32
+
+  # Sliding-window step for overlap detection (fraction of window)
+  overlap_window_step: 0.5
+
+  # Trust upgrade is never allowed: untrusted -> memory -> action is still untrusted
+  memory_upgrades_trust: false
+
+  # An adversary-controlled source taints all derived content
+  adversary_taints_all: true
+
+  # Require confirmation for all consequential actions unless already confirmed
+  require_confirmation_for_consequential: true
+
+  # When email_send lacks confirmation and email_draft is available, rewrite instead of block
+  rewrite_send_to_draft_when_unconfirmed: true
+
+  # Threshold for considering a sensitive overlap as a leak
+  sensitive_overlap_min_chars: 12

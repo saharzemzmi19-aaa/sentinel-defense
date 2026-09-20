@@ -1,0 +1,15 @@
+name: sentinel-phase1
+kind: defense
+api_version: v1
+team: indabax-tunisia-2026
+port: 8081
+models: []
+datasets: []
+resources:
+  memory: 512m
+  cpus: 1.0
+  gpus: 0
+description: >
+  Phase 1 deterministic defense: provenance graph, taint propagation,
+  data-flow analysis, capability checking, and policy engine.
+  No LLM. No ML. Deterministic and fail-closed.
