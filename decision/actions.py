@@ -26,6 +26,7 @@ class ReasonCode(StrEnum):
     USER_GOAL_ALIGNED          = "USER_GOAL_ALIGNED"
     # ── Rewrites ─────────────────────────────────────────────────────────────
     REWRITE_TO_DRAFT           = "REWRITE_TO_DRAFT"
+    LOW_RISK_AUTO_APPROVED = "LOW_RISK_AUTO_APPROVED"
 
 
 def make_decision(

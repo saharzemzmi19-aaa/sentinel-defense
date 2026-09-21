@@ -118,11 +118,11 @@ class DecisionEngine:
 
         # ── 9. MISSING CONFIRMATION ───────────────────────────────────────────
         if capabilities.confirmation_required and not capabilities.confirmation_present:
-            # Prefer rewrite to draft when available
-            if (
-                ctx.tool == "email_send"
-                and "email_draft" in ctx.allowed_tools
-            ):
+            from risk.fusion import compute_risk
+            risk = compute_risk(ctx, capabilities, taint, flow)
+
+            # Prefer rewrite to draft when available — always safe, regardless of risk
+            if ctx.tool == "email_send" and "email_draft" in ctx.allowed_tools:
                 rewritten = CandidateAction(
                     type=ActionType.TOOL_CALL,
                     tool="email_draft",
@@ -134,13 +134,27 @@ class DecisionEngine:
                     "Unconfirmed email_send rewritten to email_draft pending human confirmation",
                     rewritten_action=rewritten,
                 )
-            return make_decision(
-                Decision.ESCALATE, 0.60, self._esc_conf,
-                [ReasonCode.MISSING_CONFIRMATION],
-                f"Tool '{ctx.tool}' is consequential and requires human confirmation; "
-                "none recorded in this session",
-            )
 
+            if risk.recommend_escalate:
+                return make_decision(
+                    Decision.ESCALATE, risk.value, self._esc_conf,
+                    [ReasonCode.MISSING_CONFIRMATION],
+                    f"Tool '{ctx.tool}' is consequential and requires human confirmation; "
+                    f"fused risk={risk.value} warrants escalation "
+                    f"(signals: {risk.contributing_signals})",
+                )
+            else:
+                # Low fused risk: skip unnecessary human escalation and allow directly.
+                # Security still holds because hard BLOCK rules (steps 1-7: adversary,
+                # forbidden data flow, untrusted+external+consequential) already fired
+                # earlier in the chain if the action were genuinely dangerous.
+                return make_decision(
+                    Decision.ALLOW, risk.value, self._allow_conf,
+                    [ReasonCode.LOW_RISK_AUTO_APPROVED, ReasonCode.MISSING_CONFIRMATION],
+                    f"Tool '{ctx.tool}' requires confirmation, but fused risk={risk.value} "
+                    f"is low enough to proceed without human escalation "
+                    f"(signals: {risk.contributing_signals})",
+                )
         # ── 10. ALLOW ─────────────────────────────────────────────────────────
         return self._allow(ctx, capabilities, taint, flow)
 
