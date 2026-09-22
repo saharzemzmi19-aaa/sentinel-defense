@@ -118,9 +118,6 @@ class DecisionEngine:
 
         # ── 9. MISSING CONFIRMATION ───────────────────────────────────────────
         if capabilities.confirmation_required and not capabilities.confirmation_present:
-            from risk.fusion import compute_risk
-            risk = compute_risk(ctx, capabilities, taint, flow)
-
             # Prefer rewrite to draft when available — always safe, regardless of risk
             if ctx.tool == "email_send" and "email_draft" in ctx.allowed_tools:
                 rewritten = CandidateAction(
@@ -134,6 +131,24 @@ class DecisionEngine:
                     "Unconfirmed email_send rewritten to email_draft pending human confirmation",
                     rewritten_action=rewritten,
                 )
+
+            # ── Ablation toggle ──────────────────────────────────────────────
+            # SENTINEL_DISABLE_RISK_FUSION=1 reproduces the pre-risk-fusion
+            # baseline (Phase 1 only): every missing-confirmation case escalates
+            # unconditionally, exactly as it did before risk/fusion.py existed.
+            # Default (unset/0) behaviour — used for the official submission —
+            # is completely unchanged.
+            import os
+            if os.environ.get("SENTINEL_DISABLE_RISK_FUSION") == "1":
+                return make_decision(
+                    Decision.ESCALATE, 0.5, self._esc_conf,
+                    [ReasonCode.MISSING_CONFIRMATION],
+                    f"[ablation: risk fusion disabled] Tool '{ctx.tool}' is consequential "
+                    f"and requires human confirmation; escalating unconditionally.",
+                )
+
+            from risk.fusion import compute_risk
+            risk = compute_risk(ctx, capabilities, taint, flow)
 
             if risk.recommend_escalate:
                 return make_decision(
