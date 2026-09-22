@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from sentinel.core.provenance import Sensitivity, TrustLevel
 
 # Tools whose primary purpose is sending content to external recipients
@@ -32,20 +34,20 @@ def extract_destination(tool: str | None, arguments: dict) -> str | None:
     """Return the lowercased destination value for outbound tools, else None."""
     if not is_outbound_tool(tool):
         return None
-    for key in _DESTINATION_ARGS:
-        val = arguments.get(key)
-        if val is not None:
-            return str(val).lower()
-    return None
+    values = [str(arguments[key]).strip().lower() for key in _DESTINATION_ARGS
+              if arguments.get(key) is not None]
+    # Multiple distinct destinations must all be treated conservatively.
+    return ",".join(dict.fromkeys(values)) if values else None
 
 
 def is_external_destination(destination: str | None, internal_domains: list[str]) -> bool:
     """True when destination is non-empty and not in any internal domain."""
     if not destination:
-        return False
-    return not any(
-        destination.endswith("@" + d.lower()) for d in internal_domains
-    )
+        return True
+    match = re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@([a-z0-9.-]+)", destination.strip(), re.I)
+    if match is None:
+        return True
+    return match[1].lower() not in {d.strip().lower() for d in internal_domains}
 
 
 def normalize_trust_level(raw: str) -> TrustLevel | None:

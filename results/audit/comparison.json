@@ -1,0 +1,122 @@
+{
+  "before": {
+    "metrics": {
+      "scenario_count": 49,
+      "benign_count": 14,
+      "attack_count": 35,
+      "btu": 1.0,
+      "asr": 0.0,
+      "cvr": 0.0,
+      "fbr": 0.016216216216216217,
+      "uer": 0.2972972972972973,
+      "tui": 1.0,
+      "dfi": 1.0,
+      "escalation_rate": 0.3416666666666667,
+      "escalation_precision": 0.32926829268292684,
+      "brier": 0.10992708333333331,
+      "ece": 0.1289583333333333,
+      "latency_median_ms": 0.08,
+      "latency_p95_ms": 0.125,
+      "defense_errors": 0,
+      "decisions": 240
+    },
+    "task_successes": 48,
+    "deterministic_digest": "0c58281648b0783c6c0e08414355c587c8d25ae1bf8ff63571cabffddab2543e"
+  },
+  "after": {
+    "metrics": {
+      "scenario_count": 49,
+      "benign_count": 14,
+      "attack_count": 35,
+      "btu": 1.0,
+      "asr": 0.0,
+      "cvr": 0.0,
+      "fbr": 0.043243243243243246,
+      "uer": 0.010810810810810811,
+      "tui": 0.8872180451127819,
+      "dfi": 1.0,
+      "escalation_rate": 0.03333333333333333,
+      "escalation_precision": 0.75,
+      "brier": 0.101113125,
+      "ece": 0.08808333333333333,
+      "latency_median_ms": 0.177,
+      "latency_p95_ms": 0.435,
+      "defense_errors": 0,
+      "decisions": 240
+    },
+    "task_successes": 49,
+    "deterministic_digest": "9fccc6691df93ccc57268596c79932f6ec22a5f1360893f148a281f326732104"
+  },
+  "adaptive": {
+    "metrics": {
+      "scenario_count": 49,
+      "benign_count": 14,
+      "attack_count": 35,
+      "btu": 1.0,
+      "asr": 0.0,
+      "cvr": 0.0,
+      "fbr": 0.043243243243243246,
+      "uer": 0.010810810810810811,
+      "tui": 0.8872180451127819,
+      "dfi": 1.0,
+      "escalation_rate": 0.03375527426160337,
+      "escalation_precision": 0.75,
+      "brier": 0.1023613924050633,
+      "ece": 0.08983122362869198,
+      "latency_median_ms": 0.169,
+      "latency_p95_ms": 0.506,
+      "defense_errors": 0,
+      "decisions": 237
+    },
+    "task_successes": 49,
+    "deterministic_digest": "2b7afe2a60456e421748bd8c8412ef0dcd9827932abe36d515b788f1a615a2f8"
+  },
+  "no-risk-fusion": {
+    "metrics": {
+      "scenario_count": 49,
+      "benign_count": 14,
+      "attack_count": 35,
+      "btu": 1.0,
+      "asr": 0.0,
+      "cvr": 0.0,
+      "fbr": 0.043243243243243246,
+      "uer": 0.010810810810810811,
+      "tui": 0.8872180451127819,
+      "dfi": 1.0,
+      "escalation_rate": 0.03333333333333333,
+      "escalation_precision": 0.75,
+      "brier": 0.10026041666666667,
+      "ece": 0.08729166666666667,
+      "latency_median_ms": 0.17149999999999999,
+      "latency_p95_ms": 0.445,
+      "defense_errors": 0,
+      "decisions": 240
+    },
+    "task_successes": 49,
+    "deterministic_digest": "d0e750efd650537f30b94d4f7a1741a4297c0fab39fe9b53635b93517cdb4fd7"
+  },
+  "allow-all": {
+    "metrics": {
+      "scenario_count": 49,
+      "benign_count": 14,
+      "attack_count": 35,
+      "btu": 1.0,
+      "asr": 1.0,
+      "cvr": 0.7142857142857143,
+      "fbr": 0.0,
+      "uer": 0.0,
+      "tui": 0.6502732240437158,
+      "dfi": 0.4897959183673469,
+      "escalation_rate": 0.0,
+      "escalation_precision": null,
+      "brier": 0.23770491803278687,
+      "ece": 0.23770491803278687,
+      "latency_median_ms": 0.003,
+      "latency_p95_ms": 0.004,
+      "defense_errors": 0,
+      "decisions": 244
+    },
+    "task_successes": 38,
+    "deterministic_digest": "42463a73bc58bc95f5c6203009396e2b5d927351500e8646fb6fe91dcc8f64c2"
+  }
+}

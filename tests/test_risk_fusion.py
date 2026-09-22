@@ -13,8 +13,12 @@ from tests.conftest import make_request, make_tool_call
 from tests.test_decision import _decide
 
 
-def test_low_amount_missing_confirmation_allows_not_escalates():
-    """Small payment, missing confirmation, no untrusted content -> ALLOW not ESCALATE"""
+def test_low_amount_missing_confirmation_requires_approval():
+    """Regression: small amounts cannot override a mandatory confirmation rule.
+
+    The former ALLOW assertion endorsed the audited vulnerability. This
+    replacement strengthens the security requirement instead of removing it.
+    """
     req = make_request(
         make_tool_call("payment_execute", amount=50),
         allowed_tools=["payment_execute"],
@@ -22,8 +26,9 @@ def test_low_amount_missing_confirmation_allows_not_escalates():
         confirmation_required_tools=["payment_execute"],
     )
     dec = _decide(req)
-    assert dec.decision == Decision.ALLOW
-    assert "LOW_RISK_AUTO_APPROVED" in dec.reason_codes
+    assert dec.decision == Decision.ESCALATE
+    assert "MISSING_CONFIRMATION" in dec.reason_codes
+    assert "LOW_RISK_AUTO_APPROVED" not in dec.reason_codes
 
 def test_high_amount_missing_confirmation_still_escalates():
     """Large payment still triggers escalation -- high risk preserved"""

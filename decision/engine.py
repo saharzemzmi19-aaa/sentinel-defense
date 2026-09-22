@@ -1,16 +1,8 @@
 """Decision engine — deterministic final decision from all security signals.
 
-Decision precedence (checked in order):
-  1. INVALID_ACTION       — tool_call with no tool name
-  2. UNAUTHORIZED_TOOL    — tool not in allowed_tools
-  3. ADVERSARY + consq.   — adversary-controlled source, consequential action → BLOCK
-  4. FORBIDDEN_DATA_FLOW  — sensitive content to external sink → BLOCK
-  5. UNTRUSTED+ext+consq. — untrusted → external + consequential → BLOCK
-  6. ADVERSARY alone      — adversary-controlled source, any action → BLOCK
-  7. MEMORY_WRITE untrust — untrusted content being persisted → BLOCK
-  8. REQUEST_CONFIRMATION — agent is asking for confirmation (correct behaviour) → ALLOW
-  9. MISSING_CONFIRMATION — consequential, no confirmation → REWRITE or ESCALATE
- 10. ALLOW                — everything else passes
+Hard policy and disclosure violations precede review, confirmation, rewrite and
+allow decisions. Context taint is evidence of exposure, not semantic proof that
+every subsequent action was caused by an attacker. Risk never grants permission.
 """
 
 from __future__ import annotations
@@ -58,11 +50,20 @@ class DecisionEngine:
             return make_decision(
                 Decision.BLOCK, 0.95, self._hard_conf,
                 [ReasonCode.UNAUTHORIZED_TOOL],
-                f"Tool '{ctx.tool}' is not in the allowed tools for this task: {ctx.allowed_tools}",
+                f"Tool '{ctx.tool}' is not permitted by the task allowlist",
             )
 
+        if not capabilities.prerequisites_met:
+            return make_decision(Decision.BLOCK, 0.9, self._policy_conf,
+                                 [ReasonCode.MISSING_PREREQUISITE],
+                                 "Required earlier successful tool step is missing")
+        if policy.forbidden_effect:
+            return make_decision(Decision.BLOCK, 0.95, self._policy_conf,
+                                 [ReasonCode.POLICY_VIOLATION],
+                                 "Action would cause a forbidden effect")
         # ── 3. ADVERSARY-CONTROLLED + CONSEQUENTIAL ───────────────────────────
-        if taint.action_depends_on_adversary and capabilities.is_consequential:
+        if (taint.action_depends_on_adversary and capabilities.is_consequential
+                and not capabilities.confirmation_present and not ctx.is_confirmation_request):
             return make_decision(
                 Decision.BLOCK, 0.95, self._policy_conf,
                 [ReasonCode.ADVERSARY_CONTROLLED_SOURCE, ReasonCode.POLICY_VIOLATION],
@@ -76,14 +77,21 @@ class DecisionEngine:
             return make_decision(
                 Decision.BLOCK, 0.95, self._policy_conf,
                 [ReasonCode.FORBIDDEN_DATA_FLOW],
-                f"Sensitive content detected in payload to external destination. {details}",
+                f"Sensitive content would reach a disallowed disclosure sink. {details}",
             )
+
+        if ctx.action_type is ActionType.TOOL_CALL and flow.sink_category is SinkCategory.UNKNOWN:
+            return make_decision(Decision.ESCALATE, 0.6, self._esc_conf,
+                                 [ReasonCode.UNVERIFIED_CONSEQUENTIAL],
+                                 "Allowed tool has unknown effects; human review is required")
 
         # ── 5. UNTRUSTED → EXTERNAL + CONSEQUENTIAL ───────────────────────────
         if (
             taint.action_depends_on_untrusted
             and ctx.is_external_destination
             and capabilities.is_consequential
+            and not capabilities.confirmation_present
+            and not ctx.is_confirmation_request
         ):
             return make_decision(
                 Decision.BLOCK, 0.90, self._policy_conf,
@@ -91,21 +99,19 @@ class DecisionEngine:
                 "Untrusted content is influencing a consequential action directed at an external destination",
             )
 
-        # ── 6. ADVERSARY-CONTROLLED (non-consequential) ───────────────────────
-        if taint.action_depends_on_adversary:
-            return make_decision(
-                Decision.BLOCK, 0.90, self._policy_conf,
-                [ReasonCode.ADVERSARY_CONTROLLED_SOURCE],
-                "Action depends on content from an adversary-controlled source",
-            )
-
-        # ── 7. MEMORY_WRITE FROM UNTRUSTED ────────────────────────────────────
+        # Context exposure alone is not evidence that every later action is
+        # malicious. Reads and harmless replies remain available after attacks.
         if ctx.action_type is ActionType.MEMORY_WRITE and taint.action_depends_on_untrusted:
+            from context.normalizer import squash
+            copied = squash(ctx.content or "")
+            if len(copied) >= 12 and any(copied in squash(t) for t in taint.untrusted_texts):
+                return make_decision(
+                    Decision.BLOCK, 0.85, self._policy_conf, [ReasonCode.UNTRUSTED_SOURCE],
+                    "Untrusted content copied into persistent memory; trust cannot be upgraded",
+                )
             return make_decision(
-                Decision.BLOCK, 0.85, self._policy_conf,
-                [ReasonCode.UNTRUSTED_SOURCE],
-                "Memory write contains content derived from untrusted source; "
-                "storing untrusted content as memory does not upgrade its trust level",
+                Decision.ESCALATE, 0.5, self._esc_conf, [ReasonCode.UNTRUSTED_MEMORY_REVIEW],
+                "Review derived memory content before persistence; untrusted provenance remains",
             )
 
         # ── 8. REQUEST_CONFIRMATION — agent is doing the right thing ──────────
@@ -118,7 +124,7 @@ class DecisionEngine:
 
         # ── 9. MISSING CONFIRMATION ───────────────────────────────────────────
         if capabilities.confirmation_required and not capabilities.confirmation_present:
-            # Prefer rewrite to draft when available — always safe, regardless of risk
+            # Prefer a draft when available; the API revalidates the replacement.
             if ctx.tool == "email_send" and "email_draft" in ctx.allowed_tools:
                 rewritten = CandidateAction(
                     type=ActionType.TOOL_CALL,
@@ -132,12 +138,7 @@ class DecisionEngine:
                     rewritten_action=rewritten,
                 )
 
-            # ── Ablation toggle ──────────────────────────────────────────────
-            # SENTINEL_DISABLE_RISK_FUSION=1 reproduces the pre-risk-fusion
-            # baseline (Phase 1 only): every missing-confirmation case escalates
-            # unconditionally, exactly as it did before risk/fusion.py existed.
-            # Default (unset/0) behaviour — used for the official submission —
-            # is completely unchanged.
+            # Ablation changes only the score, never confirmation enforcement.
             import os
             if os.environ.get("SENTINEL_DISABLE_RISK_FUSION") == "1":
                 return make_decision(
@@ -150,26 +151,12 @@ class DecisionEngine:
             from risk.fusion import compute_risk
             risk = compute_risk(ctx, capabilities, taint, flow)
 
-            if risk.recommend_escalate:
-                return make_decision(
-                    Decision.ESCALATE, risk.value, self._esc_conf,
-                    [ReasonCode.MISSING_CONFIRMATION],
-                    f"Tool '{ctx.tool}' is consequential and requires human confirmation; "
-                    f"fused risk={risk.value} warrants escalation "
-                    f"(signals: {risk.contributing_signals})",
-                )
-            else:
-                # Low fused risk: skip unnecessary human escalation and allow directly.
-                # Security still holds because hard BLOCK rules (steps 1-7: adversary,
-                # forbidden data flow, untrusted+external+consequential) already fired
-                # earlier in the chain if the action were genuinely dangerous.
-                return make_decision(
-                    Decision.ALLOW, risk.value, self._allow_conf,
-                    [ReasonCode.LOW_RISK_AUTO_APPROVED, ReasonCode.MISSING_CONFIRMATION],
-                    f"Tool '{ctx.tool}' requires confirmation, but fused risk={risk.value} "
-                    f"is low enough to proceed without human escalation "
-                    f"(signals: {risk.contributing_signals})",
-                )
+            # Risk is evidence, never permission to bypass a mandatory rule.
+            return make_decision(
+                Decision.ESCALATE, risk.value, self._esc_conf,
+                [ReasonCode.MISSING_CONFIRMATION],
+                "Consequential action requires approval bound to this tool and its arguments",
+            )
         # ── 10. ALLOW ─────────────────────────────────────────────────────────
         return self._allow(ctx, capabilities, taint, flow)
 
@@ -184,8 +171,8 @@ class DecisionEngine:
         if ctx.action_type is ActionType.RESPOND:
             return make_decision(
                 Decision.ALLOW, 0.05, self._allow_conf,
-                [ReasonCode.USER_GOAL_ALIGNED],
-                "RESPOND action; no tool invoked",
+                [ReasonCode.SAFE_ACTION],
+                "Response passed the available data-flow and policy checks",
             )
         if flow.sink_category is SinkCategory.READ_ONLY:
             return make_decision(
@@ -196,12 +183,12 @@ class DecisionEngine:
         if capabilities.is_consequential and capabilities.confirmation_present:
             return make_decision(
                 Decision.ALLOW, 0.10, self._allow_conf,
-                [ReasonCode.USER_GOAL_ALIGNED],
+                [ReasonCode.SAFE_ACTION],
                 f"Consequential tool '{ctx.tool}' authorised by recorded confirmation",
             )
         return make_decision(
             Decision.ALLOW, 0.15, self._allow_conf,
-            [ReasonCode.USER_GOAL_ALIGNED],
+            [ReasonCode.SAFE_ACTION],
             f"Action '{ctx.tool or ctx.action_type}' permitted; "
             "no policy violations detected",
         )

@@ -184,7 +184,12 @@ def build_provenance_graph(ctx: NormalizedContext) -> ProvenanceGraph:
             for pid in item.provenance_ids
             if pid in ctx.provenance_map
         ]
-        trust = least_trusted([r.trust_level for r in refs]) if refs else TrustLevel.AUTHENTICATED_USER
+        trust = least_trusted([r.trust_level for r in refs]) if refs else (
+            TrustLevel.AUTHENTICATED_USER if item.role in {"user", "human", "safety"}
+            else TrustLevel.UNTRUSTED_INTERNAL
+        )
+        if any(pid not in ctx.provenance_map for pid in item.provenance_ids):
+            trust = least_trusted([trust, TrustLevel.UNTRUSTED_INTERNAL])
         sens = most_sensitive([r.sensitivity for r in refs]) if refs else Sensitivity.PUBLIC
 
         cnode = ProvenanceNode(
@@ -219,7 +224,12 @@ def build_provenance_graph(ctx: NormalizedContext) -> ProvenanceGraph:
             for pid in obs.provenance_ids
             if pid in ctx.provenance_map
         ]
-        trust = least_trusted([r.trust_level for r in refs]) if refs else TrustLevel.AUTHENTICATED_USER
+        trust = least_trusted([r.trust_level for r in refs]) if refs else (
+            TrustLevel.AUTHENTICATED_USER if obs.kind in {"user_message", "confirmation", "blocked"}
+            else TrustLevel.UNTRUSTED_INTERNAL
+        )
+        if any(pid not in ctx.provenance_map for pid in obs.provenance_ids):
+            trust = least_trusted([trust, TrustLevel.UNTRUSTED_INTERNAL])
         sens = most_sensitive([r.sensitivity for r in refs]) if refs else Sensitivity.PUBLIC
         obs_node = ProvenanceNode(
             node_id="obs:0",
@@ -240,6 +250,20 @@ def build_provenance_graph(ctx: NormalizedContext) -> ProvenanceGraph:
                     relation="derived_from",
                     tainted=False,
                 ))
+
+    # Observed derivation evidence: a copied/encoded memory or agent value
+    # inherits its earlier source's trust. parent_event_ids are event IDs, not
+    # provenance IDs, so no invented edges are made from those opaque values.
+    from dataflow.transforms import detect_sensitive_value_in_text
+    for idx, item in enumerate(ctx.conversation):
+        if item.role not in {"memory", "agent"}:
+            continue
+        for earlier, source in enumerate(ctx.conversation[:idx]):
+            node = g.get_node(f"conv:{earlier}")
+            if node and (node.is_untrusted or node.is_sensitive) and len(source.content) >= 12:
+                if detect_sensitive_value_in_text(source.content, item.content):
+                    g.add_edge(ProvenanceEdge(_eid(), f"conv:{earlier}", f"conv:{idx}",
+                                              "copied_to", node.is_untrusted))
 
     # ── Action node ───────────────────────────────────────────────────────────
     action_node = ProvenanceNode(

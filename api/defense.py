@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+import hashlib
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -65,11 +67,13 @@ class Phase1Defense(Defense):
         self._cfg = cfg
         self._decision_engine = DecisionEngine(cfg)
         self._flow_analyzer = DataFlowAnalyzer()
+        self._lock = threading.RLock()
 
     def decide(self, request: DefenseRequest) -> DefenseDecision:
         t0 = time.monotonic()
         try:
-            return self._run_pipeline(request, t0)
+            with self._lock:
+                return self._run_pipeline(request, t0)
         except Exception as exc:  # noqa: BLE001
             # Fail-closed: any unhandled exception → BLOCK
             from decision.actions import ReasonCode, make_decision
@@ -77,10 +81,10 @@ class Phase1Defense(Defense):
 
             latency_ms = (time.monotonic() - t0) * 1000
             trace = {
-                "request_id": f"{request.run_id}:{request.step_id}",
+                "request_id": hashlib.sha256(str(getattr(request, "run_id", "unknown")).encode()).hexdigest()[:16],
                 "decision": "block",
                 "reason_codes": [ReasonCode.INTERNAL_ERROR],
-                "error": str(exc)[:200],
+                "error_type": type(exc).__name__,
                 "latency_ms": round(latency_ms, 2),
             }
             print(json.dumps(trace), file=sys.stderr)
@@ -110,10 +114,23 @@ class Phase1Defense(Defense):
         # ── Stage 6: Decision ──────────────────────────────────────────────────
         decision = self._decision_engine.decide(ctx, capabilities, taint, flow, policy)
 
+        from sentinel.core.actions import Decision
+        from decision.actions import ReasonCode, make_decision
+        if decision.decision is Decision.REWRITE:
+            # A draft is a real disclosure sink and has its own policy scope.
+            replacement = request.model_copy(update={"candidate_action": decision.rewritten_action})
+            checked = self._run_pipeline(replacement, t0)
+            if checked.decision is not Decision.ALLOW:
+                decision = make_decision(Decision.BLOCK, checked.risk_score, checked.confidence,
+                                         [ReasonCode.POLICY_VIOLATION],
+                                         "Proposed replacement did not pass all security checks")
+        self._flow_analyzer.record(ctx, decision)
+
         # ── Structured trace → stderr (JSON, one line) ─────────────────────────
         latency_ms = (time.monotonic() - t0) * 1000
         trace = {
-            "request_id":                f"{ctx.run_id}:{ctx.step_id}",
+            "request_id":                hashlib.sha256(ctx.run_id.encode()).hexdigest()[:16],
+            "step_id":                   ctx.step_id,
             "action_type":               ctx.action_type.value,
             "tool":                      ctx.tool,
             "decision":                  decision.decision,
@@ -129,12 +146,19 @@ class Phase1Defense(Defense):
             "tool_allowed":              capabilities.tool_allowed,
             "confirmation_required":     capabilities.confirmation_required,
             "confirmation_present":      capabilities.confirmation_present,
-            "policy_findings":           policy.findings[:5],
+            "policy_finding_count":      len(policy.findings),
+            "prerequisites_met":         capabilities.prerequisites_met,
+            "prerequisites_unresolved":  capabilities.unresolved_prerequisites,
+            "destination_external":      ctx.is_external_destination,
+            "transformations":           sorted({f.encoding for f in flow.findings}),
+            "provenance_path":           [
+                n.node_type + ":" + hashlib.sha256(n.node_id.encode()).hexdigest()[:8]
+                for n in graph.ancestors("action:0")][:24] + ["action:0"],
             "latency_ms":                round(latency_ms, 2),
         }
         print(json.dumps(trace), file=sys.stderr)
-
-        return decision
+        evidence = {k: v for k, v in trace.items() if k not in {"request_id", "latency_ms"}}
+        return decision.model_copy(update={"metadata": evidence})
 
     def close(self) -> None:
         pass  # nothing to tear down in Phase 1

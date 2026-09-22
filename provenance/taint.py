@@ -67,40 +67,22 @@ def propagate_taint(ctx: NormalizedContext, graph: ProvenanceGraph) -> TaintResu
     trust_levels: list[TrustLevel] = []
     sensitivity_levels: list[Sensitivity] = []
 
-    # Walk provenance records referenced by conversation items
-    for item in ctx.conversation:
-        item_provs = [
-            ctx.provenance_map[pid].provenance
-            for pid in item.provenance_ids
-            if pid in ctx.provenance_map
-        ]
-        for p in item_provs:
-            trust_levels.append(p.trust_level)
-            sensitivity_levels.append(p.sensitivity)
-
-            if p.trust_level in _UNTRUSTED:
-                untrusted_texts.append(item.content)
-            if p.trust_level in _ADVERSARY:
-                adversary_texts.append(item.content)
-            if p.sensitivity in _SENSITIVE:
-                sensitive_texts.append(item.content)
-
-    # Also consider observation provenance
+    # Graph-derived labels also preserve observed trust laundering through
+    # agent output / memory rather than trusting a new record's label alone.
+    items = [(f"conv:{i}", item.content) for i, item in enumerate(ctx.conversation)]
     if ctx.observation is not None:
-        obs_provs = [
-            ctx.provenance_map[pid].provenance
-            for pid in ctx.observation.provenance_ids
-            if pid in ctx.provenance_map
-        ]
-        for p in obs_provs:
-            trust_levels.append(p.trust_level)
-            sensitivity_levels.append(p.sensitivity)
-            if p.trust_level in _UNTRUSTED:
-                untrusted_texts.append(ctx.observation.content)
-            if p.trust_level in _ADVERSARY:
-                adversary_texts.append(ctx.observation.content)
-            if p.sensitivity in _SENSITIVE:
-                sensitive_texts.append(ctx.observation.content)
+        items.append(("obs:0", ctx.observation.content))
+    for node_id, content in items:
+        trust = graph.source_trust_level(node_id)
+        sensitivity = graph.source_sensitivity(node_id)
+        trust_levels.append(trust)
+        sensitivity_levels.append(sensitivity)
+        if trust in _UNTRUSTED:
+            untrusted_texts.append(content)
+        if trust in _ADVERSARY:
+            adversary_texts.append(content)
+        if sensitivity in _SENSITIVE:
+            sensitive_texts.append(content)
 
     worst_trust = least_trusted(trust_levels)
     worst_sens = most_sensitive(sensitivity_levels)

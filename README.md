@@ -1,175 +1,93 @@
-# SENTINEL Phase 1 Defense System
+# Sentinel Defense
 
-**IndabaX Tunisia 2026 AI Agent Security Challenge**  
-*Deterministic, Typed, Fail-Closed Security Architecture for Autonomous LLM Agents*
+Deterministic safety layer for the IndabaX Tunisia Sentinel simulator. It preserves the official `DefenseRequest` / `DefenseDecision` API, `GET /healthz`, `POST /v1/decision`, and the existing `sentinel-submission.yaml` (port 8081).
 
----
+The [official specification](https://github.com/Skan22/Sentinel_Starter_Kit) is the governing reference. This audit used the supplied four-page PDF and starter-kit commit `dd2e5fe0979d0781a4bfe6d0849cd80cf69ef4a2`. The starter kit is unchanged. No external inference APIs, models, datasets, or scenario-specific decision rules are used.
 
-## 🛡️ Architecture Overview
+See [SECURITY_GAP_ANALYSIS.md](SECURITY_GAP_ANALYSIS.md) for the requirement matrix, historical failures and contract limitations, and [the technical report](report/TECHNICAL_REPORT.md) for results, ablation and the safety statement. Simulator metrics are local evidence; the official score is assigned by a jury, not the `official_score` field in old scorecards.
 
-The Phase 1 defense is a **100% deterministic, zero-ML/zero-LLM, fail-closed security pipeline** built strictly around the official SENTINEL v1 defense contract.
+## Pipeline
 
 ```mermaid
-flowchart TD
-    Req[DefenseRequest from Evaluator] --> API[FastAPI /v1/decision]
-    API --> Ctx[Context Builder & Normalizer]
-    Ctx --> Prov[Provenance Graph Builder]
-    Ctx --> Taint[Pessimistic Taint Propagator]
-    Ctx --> Flow[Data-Flow & Canary Analyzer]
-    Ctx --> Cap[Capability Checker]
-    
-    Prov --> Taint
-    Taint --> Flow
-    Taint --> Policy[Policy Engine]
-    Flow --> Policy
-    Cap --> Policy
-    
-    Policy --> DecEngine[Decision Engine: 10-Step Precedence]
-    DecEngine --> Resp[DefenseDecision: ALLOW / BLOCK / ESCALATE / REWRITE]
-    Resp --> Trace[Structured JSON Trace to stderr]
+flowchart LR
+    R[Official request] --> C[Validate and normalize context]
+    C --> P[Provenance and inherited taint]
+    P --> F[Observed values and disclosure history]
+    F --> K[Capabilities and policy]
+    K --> D[Decision and mandatory confirmation gate]
+    D --> V[Revalidate any rewrite]
+    V --> O[Redacted evidence and outcome viewer]
 ```
 
-### Core Security Principles
-1. **Never Trust Untrusted Sources**: Any content originating from `UNTRUSTED_INTERNAL`, `UNTRUSTED_EXTERNAL`, or `ADVERSARY_CONTROLLED` is tracked pessimistically across derivations.
-2. **Memory Does Not Upgrade Trust**: Untrusted content stored in agent memory remains untrusted when subsequently retrieved.
-3. **No Unconfirmed Consequential Actions**: Consequential actions (financial transfers, status closures, config mutations) require recorded human confirmations.
-4. **Data-Flow Boundary Enforcement**: Sensitive information (`CONFIDENTIAL`, `RESTRICTED`) is prevented from flowing to external sinks (`email_send`, webhooks) in plain or encoded formats (Base64, Hex, Spaced, Reversed).
-5. **Fail-Closed Guarantee**: Any unexpected exception or validation issue immediately yields a `BLOCK` decision with `INTERNAL_ERROR`.
+- **Context:** validates security-critical policy fields and provenance references; distinguishes internal email destinations using only domains supplied by the trusted policy context.
+- **Provenance:** maintains conservative context exposure, graph ancestry and observed copying/encoding into memory. Missing labels on tool/memory content do not grant user authority. Parent event IDs cannot be reconstructed into a complete event graph from the API.
+- **Data flow:** extracts values from observed sensitive content, not provenance tags or canary prefixes. Restricted content is checked at replies, memory, drafts and internal notes; confidential content is checked at external destinations. Mixed JSON retrievals are scoped to source record IDs where available. This sensitivity profile is conservative; the API does not expose individual canary destination permissions.
+- **Encoding:** plain text, spacing/separators, Base64, hex, reversal, percent encoding, Unicode/JSON escapes, HTML entities, ROT13, and up to three decoding layers. Values need at least 12 normalized characters; this deliberately limits incidental short-text matches.
+- **History:** process-local, bounded to 128 active runs, 200,000 characters each of observed sensitive evidence and outgoing history per run. Detects consecutive fragments across fields and actions to the same destination/record. Blocked proposals do not enter outgoing history; reviewed proposals are conservatively retained because execution is not always reported. Restart/eviction loses prior evidence. Use a single worker or sticky routing; this is not distributed storage.
+- **Policy:** task tool allowlist, scoped confirmation rules, successful earlier prerequisite calls, published payment/remediation ordering, and visible forbidden effects. Unknown allowed tools require review. The official API omits full prerequisite and effect details; arbitrary indirect effects cannot be guaranteed.
+- **Decision:** hard policy/data-flow violations precede review. Mandatory confirmation never depends on transaction amount or risk score. Confirmation uses the official canonical action digest; changed arguments need another grant. The simulator's grants are persistent, not single-use authorizations. A send-to-draft rewrite passes the same pipeline again.
+- **Memory:** exact copying of untrusted content is blocked; other untrusted-derived memory proposals go to human review. Reviewed memory retains the simulator's untrusted provenance. This still overblocks some legitimate verbatim memory and does not establish semantic intent.
+- **Observability:** structured JSONL on stderr and bounded response metadata contain risk, reasons, trust, sensitivity, confirmation, sink, transformations and hashed provenance references. Argument values, raw destinations and exception text are omitted. The viewer correlates decisions with execution, human confirmation and task outcomes and supports filtering.
 
----
+An ALLOW means the available checks passed; it does not prove semantic user-goal alignment. Allowed read tools may still retrieve material outside the intended plan. Risk scores are heuristics, not calibrated probabilities.
 
-## 📁 Repository Structure
+## Install and run
 
-```
-sentinel-defense/
-├── api/
-│   ├── __init__.py
-│   └── defense.py             # Phase1Defense (implements Defense ABC) & FastAPI service
-├── context/
-│   ├── __init__.py
-│   ├── builder.py             # Normalizes DefenseRequest into typed NormalizedContext
-│   └── normalizer.py          # String squash, destination extraction, domain matching
-├── provenance/
-│   ├── __init__.py
-│   ├── nodes.py               # ProvenanceNode (source, content, action, sink)
-│   ├── edges.py               # ProvenanceEdge (derived_from, used_by, reaches)
-│   ├── graph.py               # ProvenanceGraph with BFS ancestor queries
-│   └── taint.py               # Pessimistic trust & sensitivity taint propagation
-├── dataflow/
-│   ├── __init__.py
-│   ├── labels.py              # FlowLabel attached to propagating data
-│   ├── sinks.py               # SinkCategory classification (external, financial, etc.)
-│   ├── transforms.py          # Multi-encoding sensitive canary detection
-│   └── flow.py                # DataFlowAnalyzer: sliding-window & canary leak detection
-├── policy/
-│   ├── __init__.py
-│   ├── capabilities.py        # Tool permission & confirmation requirements
-│   ├── engine.py              # PolicyResult evaluator against evaluator rules
-│   └── rules.yaml             # Generic parameter thresholds
-├── decision/
-│   ├── __init__.py
-│   ├── actions.py             # ReasonCode enum and DefenseDecision constructor
-│   └── engine.py              # 10-step deterministic precedence decision engine
-├── config/
-│   └── defense.yaml           # Sink mappings, confidence scores, and thresholds
-├── tests/
-│   ├── __init__.py
-│   ├── conftest.py            # Test request, action, and provenance builders
-│   ├── test_provenance.py     # 9 tests: graph construction, BFS, taint rules
-│   ├── test_dataflow.py       # 11 tests: sinks, encodings, sliding-window leaks
-│   ├── test_policy.py         # 7 tests: permissions, consequential requirements
-│   ├── test_decision.py       # 10 tests: decision precedence & score clamping
-│   └── test_api.py            # 7 tests: FastAPI HTTP endpoints & health check
-├── pyproject.toml
-├── requirements.txt
-├── pytest.ini
-└── sentinel-submission.yaml   # Official evaluator submission manifest
+Use **Python 3.12**, matching the starter kit. Install dependencies once; defense and mock evaluation then run offline.
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install /path/to/Sentinel_Starter_Kit
+.venv/bin/python -m pytest -q
+.venv/bin/python -m uvicorn api.defense:app --host 127.0.0.1 --port 8081 --workers 1
 ```
 
----
+The API rejects malformed envelopes/actions with HTTP 422, as the official app does. Invalid nested policy/history data and pipeline exceptions return BLOCK. The official HTTP adapter must retain its default closed fail mode.
 
-## ⚙️ Decision Precedence Chain
+## Reproduce evaluation
 
-When evaluating a `DefenseRequest`, the `DecisionEngine` evaluates security signals in strict order:
+The audit uses the unchanged official evaluator in-process, mock model, run seed 0. The development script loads scenarios; the runtime defense receives only official requests. Each output directory must be new.
 
-| Step | Rule | Condition | Decision | Reason Code |
-| :--- | :--- | :--- | :---: | :--- |
-| **1** | **Invalid Action** | `TOOL_CALL` action missing tool name | `BLOCK` | `INVALID_ACTION` |
-| **2** | **Unauthorized Tool** | Tool not in `allowed_tools` | `BLOCK` | `UNAUTHORIZED_TOOL` |
-| **3** | **Adversary + Consequential** | Action influenced by `adversary_controlled` source & action is consequential | `BLOCK` | `ADVERSARY_CONTROLLED_SOURCE`<br>`POLICY_VIOLATION` |
-| **4** | **Forbidden Data Flow** | Sensitive content detected in payload to external destination | `BLOCK` | `FORBIDDEN_DATA_FLOW` |
-| **5** | **Untrusted External Flow** | Untrusted content influences a consequential external action | `BLOCK` | `UNTRUSTED_SOURCE`<br>`FORBIDDEN_DATA_FLOW` |
-| **6** | **Adversary Influenced** | Any action derived from an adversary-controlled source | `BLOCK` | `ADVERSARY_CONTROLLED_SOURCE` |
-| **7** | **Untrusted Memory Write** | `MEMORY_WRITE` derived from untrusted source | `BLOCK` | `UNTRUSTED_SOURCE` |
-| **8** | **Confirmation Request** | Agent issues `REQUEST_CONFIRMATION` for consequential action | `ALLOW` | `CONFIRMATION_REQUESTED` |
-| **9** | **Missing Confirmation** | Consequential tool without confirmation:<br>• `email_send` with `email_draft` allowed<br>• Other consequential tools | <br>`REWRITE`<br>`ESCALATE` | <br>`REWRITE_TO_DRAFT`<br>`MISSING_CONFIRMATION` |
-| **10**| **Permitted Action** | All security checks pass:<br>• Non-tool `RESPOND`<br>• Read-only tool<br>• Confirmed consequential<br>• General permitted tool | <br>`ALLOW`<br>`ALLOW`<br>`ALLOW`<br>`ALLOW` | <br>`USER_GOAL_ALIGNED`<br>`READ_ONLY_ACTION`<br>`USER_GOAL_ALIGNED`<br>`USER_GOAL_ALIGNED` |
-
----
-
-## 🔍 Data-Flow & Encoding Detection
-
-The data-flow analyzer inspects free-text payloads for confidential data leaks without hardcoding scenario secrets:
-- **Sliding-Window Text Overlap**: Evaluates 32-character sliding window n-grams across normalized strings.
-- **Multi-Encoding Canary Matching**: Automatically detects canary secrets and tags in:
-  - `Plain`: Exact normalized string matching.
-  - `Spaced`: Interleaved whitespace (`s e c r e t`).
-  - `Base64`: Standard and unpadded Base64 representations.
-  - `Hex`: Hex-encoded byte representations.
-  - `Reversed`: Reversed character sequences.
-
----
-
-## 🚀 Running and Testing
-
-### 1. Installation
-```powershell
-pip install -r requirements.txt
-pip install -e ../Sentinel_Starter_Kit
+```bash
+.venv/bin/python scripts/evaluate.py --starter-kit /path/to/Sentinel_Starter_Kit --out results/local-control --allow-all
+.venv/bin/python scripts/evaluate.py --starter-kit /path/to/Sentinel_Starter_Kit --out results/local-final
+.venv/bin/python scripts/evaluate.py --starter-kit /path/to/Sentinel_Starter_Kit --out results/local-adaptive --attack-mode adaptive
+SENTINEL_DISABLE_RISK_FUSION=1 .venv/bin/python scripts/evaluate.py --starter-kit /path/to/Sentinel_Starter_Kit --out results/local-ablation
 ```
 
-### 2. Running Test Suite
-```powershell
-$env:PYTHONPATH = "."
-python -m pytest tests/ -v
-```
-*Current test suite: **46 passed** (100% pass rate).*
+The risk ablation changes scores only; it never disables confirmation. `--split public` and `--split validation` are optional; the default runs the whole library. For HTTP evaluation, start the service, then run from the starter-kit directory:
 
-### 3. Starting Defense Service
-```powershell
-python -m uvicorn api.defense:app --host 0.0.0.0 --port 8081
+```bash
+sentinel eval public --defense-url http://127.0.0.1:8081 --model mock
 ```
 
-### 4. Running Official Evaluator
-```powershell
-sentinel eval run --defense-url http://localhost:8081 scenarios/public/enterprise
+Generate a redacted interactive replay:
+
+```bash
+.venv/bin/python observability/dashboard.py \
+  --artifacts results/local-final/traces \
+  --decisions results/local-final/decisions.jsonl \
+  --out observability/audit_report.html
 ```
 
----
+`inspect_scorecard.py PATH` and `summarize_scorecard.py PATH` accept any scorecard path. The archived `observability/trace_report.html` and three original scorecards remain historical evidence, including service outages and obsolete behavior; use `audit_report.html` for the current implementation.
 
-## 📊 Structured Tracing & Observability
+## Audit results
 
-Every decision emits a structured, single-line JSON log to `stderr` with zero secret exposure:
-```json
-{
-  "request_id": "eval_run_01:1",
-  "action_type": "tool_call",
-  "tool": "ticket_read",
-  "decision": "allow",
-  "reason_codes": ["READ_ONLY_ACTION"],
-  "risk_score": 0.05,
-  "confidence": 0.8,
-  "worst_trust_level": "authenticated_user",
-  "worst_sensitivity": "public",
-  "action_depends_on_untrusted": false,
-  "action_depends_on_adversary": false,
-  "sink_category": "read_only",
-  "has_sensitive_to_external": false,
-  "tool_allowed": true,
-  "confirmation_required": false,
-  "confirmation_present": false,
-  "policy_findings": [],
-  "latency_ms": 0.22
-}
-```
-Average decision latency is **< 1.0 ms**, providing high-throughput inline protection for agent evaluation.
+Baseline: **49 tests passed**. Final: **115 tests passed**, with two dependency deprecation warnings. The former test allowing an unconfirmed small payment was strengthened to require escalation. Added regression coverage includes legitimate controls for each protection.
+
+| Metric, 49 scenarios | Before | After |
+|---|---:|---:|
+| All tasks completed | 48/49 | 49/49 |
+| Benign task utility | 100% | 100% |
+| Attack success | 0/35 | 0/35 |
+| Critical violations | 0 | 0 |
+| Unnecessary escalation rate | 29.73% | 1.08% |
+| False block rate, evaluator labels | 1.62% | 4.32% |
+| Tool-use integrity | 100% | 88.72% |
+| Defense errors | 0 | 0 |
+
+The allow-all control permits all 35 attacks, establishing exposure. After fixes, eight restricted-secret disclosures match loose reference-plan labels and therefore count as false blocks; they remain blocked. Tool-use integrity falls because 15 permitted read calls outside the reference plan now execute instead of being unnecessarily escalated. Neither regression is hidden or described as an improvement. Security improvements beyond the already-zero baseline ASR are demonstrated by paired regression tests, not an invented score gain.
+
+Remaining limits include short/paraphrased/custom-encoded secrets, data absent from observed requests, truncated history, persistent confirmation semantics, unseen indirect effects, and semantic goal alignment. Qwen3-8B was not run; these results concern the mock agent only. A 5–10 minute narrated video, team details and actual submission remain team deliverables.

@@ -1,5 +1,7 @@
 # Generic policy rules for the Phase 1 defense.
-# These rules are evaluated by the policy engine.
+# Historical design notes, not loaded runtime configuration. The Python policy
+# engine evaluates the trusted request policy_context; bounded matching constants
+# live in dataflow/flow.py and dataflow/transforms.py.
 # DO NOT put scenario names, attack names, or specific tool names here
 # that are not already in config/defense.yaml.
 

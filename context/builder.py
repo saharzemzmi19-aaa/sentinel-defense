@@ -77,6 +77,7 @@ class NormalizedContext:
     action_text_payload: str   # all free text from effective_action
     destination: str | None
     is_external_destination: bool
+    forbidden_effects: list[str] = field(default_factory=list)
 
 
 def build_context(request: DefenseRequest) -> NormalizedContext:
@@ -85,6 +86,45 @@ def build_context(request: DefenseRequest) -> NormalizedContext:
     Preserves all information from the request — nothing is discarded.
     """
     pc = request.policy_context
+    # The official envelope intentionally leaves policy_context untyped. Never
+    # let e.g. a string allowlist turn membership into a substring permission.
+    for key in ("allowed_tools", "consequential_tools", "confirmation_required_tools",
+                "internal_email_domains", "forbidden_effects"):
+        value = pc.get(key, [])
+        if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
+            raise ValueError("Invalid policy list")
+    rules = pc.get("rules", [])
+    if not isinstance(rules, list) or any(not isinstance(r, dict) for r in rules):
+        raise ValueError("Invalid policy rules")
+    for rule in rules:
+        if rule.get("kind") not in {"tool_permission", "requires_confirmation", "data_flow",
+                                    "forbidden_effect", "prerequisite"}:
+            raise ValueError("Unsupported policy rule")
+        scope = rule.get("tools", "consequential")
+        if scope != "consequential" and (not isinstance(scope, list) or
+                                         any(not isinstance(x, str) for x in scope)):
+            raise ValueError("Invalid confirmation scope")
+        if "requires" in rule and (not isinstance(rule["requires"], list) or
+                                  not rule["requires"] or
+                                  any(not isinstance(x, str) for x in rule["requires"])):
+            raise ValueError("Invalid prerequisite")
+        if rule.get("kind") == "prerequisite" and (
+            ("tool" in rule) != ("requires" in rule)
+            or ("tool" in rule and not isinstance(rule["tool"], str))
+        ):
+            raise ValueError("Incomplete prerequisite rule")
+    if len({p.id for p in request.provenance}) != len(request.provenance):
+        raise ValueError("Duplicate provenance IDs")
+    known_ids = {p.id for p in request.provenance}
+    items = [*request.conversation]
+    if request.observation is not None:
+        items.append(request.observation)
+    if any(pid not in known_ids for item in items for pid in item.provenance_ids):
+        raise ValueError("Unresolved provenance reference")
+    if request.history_digest.least_trusted_seen is not None:
+        TrustLevel(request.history_digest.least_trusted_seen)
+    if request.history_digest.most_sensitive_seen is not None:
+        Sensitivity(request.history_digest.most_sensitive_seen)
 
     # ── Unwrap REQUEST_CONFIRMATION ───────────────────────────────────────────
     candidate = request.candidate_action
@@ -120,7 +160,7 @@ def build_context(request: DefenseRequest) -> NormalizedContext:
             consequential = True
         else:
             status = args.get("status")
-            if isinstance(status, str) and status in STATUS_CONSEQUENTIAL.get(tool, set()):
+            if isinstance(status, str) and status.strip() in STATUS_CONSEQUENTIAL.get(tool, set()):
                 consequential = True
 
     # ── is_confirmed ──────────────────────────────────────────────────────────
@@ -128,7 +168,7 @@ def build_context(request: DefenseRequest) -> NormalizedContext:
 
     # ── Destination ───────────────────────────────────────────────────────────
     dest = extract_destination(tool, args)
-    ext_dest = is_external_destination(dest, internal_domains)
+    ext_dest = is_outbound_tool(tool) and is_external_destination(dest, internal_domains)
 
     return NormalizedContext(
         run_id=request.run_id,
@@ -157,4 +197,5 @@ def build_context(request: DefenseRequest) -> NormalizedContext:
         action_text_payload=effective.text_payload(),
         destination=dest,
         is_external_destination=ext_dest,
+        forbidden_effects=list(pc.get("forbidden_effects", [])),
     )

@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+# Generated evaluation runs (raw synthetic traces remain available locally).
+# Curated scorecards, environment and redacted evidence are kept at audit root.
+results/audit/*/

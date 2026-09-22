@@ -16,6 +16,8 @@ class ReasonCode(StrEnum):
     POLICY_VIOLATION           = "POLICY_VIOLATION"
     INVALID_ACTION             = "INVALID_ACTION"
     INTERNAL_ERROR             = "INTERNAL_ERROR"
+    MISSING_PREREQUISITE       = "MISSING_PREREQUISITE"
+    UNTRUSTED_MEMORY_REVIEW    = "UNTRUSTED_MEMORY_REVIEW"
     # ── Escalations ──────────────────────────────────────────────────────────
     MISSING_CONFIRMATION       = "MISSING_CONFIRMATION"
     UNVERIFIED_CONSEQUENTIAL   = "UNVERIFIED_CONSEQUENTIAL"

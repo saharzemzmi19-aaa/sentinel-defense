@@ -1,4 +1,14 @@
-﻿import json
-data = json.load(open(r"C:\Users\Gigabyte\Sentinel_Starter_Kit\artifacts\scorecards\eval-public-http_defense-20260921T212153Z.json", encoding="utf-8"))
-for r in data["outcomes"]:
-    print(f"{r['scenario_id']:<35} family={r['attack_family']:<25} attack_success={r['attack_success']!s:<6} task_success={r['task_success']!s:<6} critical_violation={r['critical_violation']!s:<6} data_flow_violation={r['data_flow_violation']}")
+"""Summarize every scenario outcome in a local evaluator scorecard."""
+import argparse
+import json
+from pathlib import Path
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('scorecard', type=Path)
+    args = parser.parse_args()
+    data = json.loads(args.scorecard.read_text(encoding='utf-8'))
+    for row in data.get('outcomes') or []:
+        print(f"{row['scenario_id']:<40} family={row['attack_family']:<25} "
+              f"attack={row['attack_success']} task={row['task_success']} "
+              f"critical={row['critical_violation']} data_flow={row['data_flow_violation']}")

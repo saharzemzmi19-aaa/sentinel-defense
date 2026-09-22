@@ -3,45 +3,13 @@ server:
   port: 8081
 
 decision:
-  block_at: 0.75
-  escalate_at: 0.40
   hard_block_confidence: 0.95
   policy_block_confidence: 0.85
   escalate_confidence: 0.65
   allow_confidence: 0.80
 
-provenance:
-  untrusted_levels:
-    - untrusted_internal
-    - untrusted_external
-    - adversary_controlled
-  adversary_levels:
-    - adversary_controlled
-
-data_flow:
-  sensitive_levels:
-    - confidential
-    - restricted
-  # Source types that are not authoritative for consequential actions
-  non_authoritative_source_types:
-    - email
-    - document
-    - wiki
-    - ticket
-    - log
-    - intel
-    - alert
-    - tool_output
-    - memory
-
-canary:
-  encodings:
-    - plain
-    - spaced
-    - base64
-    - hex
-    - reversed
-
+# These classify effects, not permissions. Permissions and confirmation rules
+# always come from the trusted request policy_context. Unknown tools need review.
 sink:
   external_communication:
     - email_send
@@ -50,13 +18,18 @@ sink:
     - webhook_post
     - http_post
   financial_execution:
+    - payment_prepare
     - payment_execute
     - payment_confirm
     - wire_transfer
     - payment_submit
   state_changing:
     - ticket_update
+    - case_note_create
+    - incident_create
     - incident_update
+    - remediation_prepare
+    - remediation_execute
     - case_update
     - config_update
     - firewall_update

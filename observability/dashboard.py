@@ -1,225 +1,139 @@
+"""Offline, redacted action/decision/outcome viewer for official JSONL traces.
+
+Usage: python observability/dashboard.py --artifacts results/audit/traces --out observability/audit_report.html
+Optional --decisions associates the defense's redacted JSONL evidence by run/step.
+Raw argument values, user text, model replies and exception messages are omitted.
 """
-observability/dashboard.py
-
-Lit tous les fichiers .jsonl produits par les runs SENTINEL (starter kit)
-sous un dossier artifacts/, et genere une page HTML unique et lisible :
-un tableau par run, colore par decision (ALLOW/BLOCK/ESCALATE/REWRITE),
-avec risk_score, reason_codes, tool, arguments et explanation.
-
-Usage (depuis la racine de sentinel-defense, venv active) :
-
-    python observability\\dashboard.py
-
-Par defaut :
-  - lit recursivement C:\\Users\\Gigabyte\\Sentinel_Starter_Kit\\artifacts\\*.jsonl
-  - ecrit observability\\trace_report.html
-
-Options :
-    python observability\\dashboard.py --artifacts <dossier> --out <fichier.html>
-"""
-
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
-from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 
-DEFAULT_ARTIFACTS_DIR = Path(
-    r"C:\Users\Gigabyte\Sentinel_Starter_Kit\artifacts"
-)
-DEFAULT_OUT = Path(__file__).resolve().parent / "trace_report.html"
-
-DECISION_COLORS = {
-    "allow": "#1e7e34",       # vert
-    "block": "#b02a37",       # rouge
-    "escalate": "#e0a800",    # orange
-    "rewrite": "#0d6efd",     # bleu
-}
-DECISION_BG = {
-    "allow": "#eaf7ee",
-    "block": "#fbe9eb",
-    "escalate": "#fff6e0",
-    "rewrite": "#e8f0fe",
-}
+DEFAULT_ARTIFACTS_DIR = Path('results/audit/traces')
+DEFAULT_OUT = Path(__file__).resolve().parent / 'audit_report.html'
 
 
 def find_jsonl_files(artifacts_dir: Path) -> list[Path]:
     if not artifacts_dir.exists():
-        raise FileNotFoundError(f"Dossier introuvable : {artifacts_dir}")
-    return sorted(artifacts_dir.rglob("*.jsonl"))
+        raise FileNotFoundError(artifacts_dir)
+    return sorted(artifacts_dir.rglob('*.jsonl'))
 
 
 def load_events(path: Path) -> list[dict]:
     events = []
-    with path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                print(f"  [!] Ligne JSON invalide ignoree ({path.name}:{line_no}): {exc}")
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if not isinstance(item, dict):
+            raise ValueError('Expected an event object')
+        events.append(item)
     return events
 
 
-def summarize_run(events: list[dict]) -> dict:
-    """Associe chaque defense_decision au contexte (user_message precedent,
-    tool_request qui suit), et calcule des compteurs par decision."""
+def summarize_run(events: list[dict], evidence: dict | None = None) -> dict:
     rows = []
-    counts = defaultdict(int)
-    last_user_text = None
+    counts: Counter = Counter()
+    for event in events:
+        if event.get('type') != 'defense_decision':
+            continue
+        payload = event.get('payload') or {}
+        action = payload.get('action') or {}
+        step = event.get('step_id')
+        outcomes = [e for e in events if e.get('step_id') == step and e.get('type') in
+                    {'tool_result', 'retrieval_result', 'human_confirmation', 'policy_violation',
+                     'memory_write', 'model_output', 'task_success', 'task_failure'}]
+        result = []
+        for outcome in outcomes:
+            p = outcome.get('payload') or {}
+            kind = outcome['type']
+            if kind in {'tool_result', 'retrieval_result'}:
+                result.append('tool succeeded' if p.get('succeeded') else 'tool failed')
+            elif kind == 'human_confirmation':
+                result.append('human approved' if p.get('approved') else 'human denied')
+            else:
+                result.append(kind.replace('_', ' '))
+        run_hash = hashlib.sha256(str(event.get('run_id', '')).encode()).hexdigest()[:16]
+        trace = (evidence or {}).get((run_hash, step), {})
+        safe_evidence = {k: trace[k] for k in (
+            'worst_trust_level', 'worst_sensitivity', 'confirmation_required', 'confirmation_present',
+            'destination_external', 'sink_category', 'transformations', 'provenance_path',
+            'prerequisites_met', 'prerequisites_unresolved', 'policy_finding_count') if k in trace}
+        decision = str(payload.get('decision', 'unknown'))
+        counts[decision] += 1
+        rows.append({'step': step, 'decision': decision, 'risk': payload.get('risk_score'),
+                     'confidence': payload.get('confidence'), 'tool': action.get('tool') or action.get('type'),
+                     'argument_fields': sorted((action.get('arguments') or {}).keys()),
+                     'reasons': payload.get('reason_codes', []), 'outcome': ', '.join(result) or 'stopped / no execution',
+                     'error': bool(payload.get('defense_error')), 'evidence': safe_evidence})
+    return {'rows': rows, 'counts': counts}
 
-    for ev in events:
-        etype = ev.get("type")
-        payload = ev.get("payload", {}) or {}
 
-        if etype == "user_message":
-            last_user_text = payload.get("text")
-
-        elif etype == "defense_decision":
-            action = payload.get("action", {}) or {}
-            decision = str(payload.get("decision", "unknown")).lower()
-            counts[decision] += 1
-            rows.append(
-                {
-                    "seq": ev.get("seq"),
-                    "step_id": ev.get("step_id"),
-                    "timestamp": ev.get("timestamp"),
-                    "decision": decision,
-                    "risk_score": payload.get("risk_score"),
-                    "confidence": payload.get("confidence"),
-                    "reason_codes": payload.get("reason_codes") or [],
-                    "tool": action.get("tool"),
-                    "arguments": action.get("arguments"),
-                    "explanation": payload.get("explanation"),
-                    "defense_error": payload.get("defense_error"),
-                    "context": last_user_text,
-                }
-            )
-
-    return {"rows": rows, "counts": counts}
-
-
-def render_badge(decision: str) -> str:
-    color = DECISION_COLORS.get(decision, "#555")
-    bg = DECISION_BG.get(decision, "#eee")
-    label = html.escape(decision.upper())
-    return (
-        f'<span style="background:{bg};color:{color};font-weight:600;'
-        f'padding:2px 8px;border-radius:10px;font-size:12px;">{label}</span>'
-    )
+def _escape(value: object) -> str:
+    return html.escape(str(value))
 
 
 def render_run(run_name: str, summary: dict) -> str:
-    rows = summary["rows"]
-    counts = summary["counts"]
-
-    count_badges = " ".join(
-        f'<span style="margin-right:10px;">{render_badge(dec)} &times; {n}</span>'
-        for dec, n in sorted(counts.items())
-    )
-
-    body_rows = []
-    for r in rows:
-        reason_codes = ", ".join(html.escape(str(c)) for c in r["reason_codes"])
-        args = html.escape(json.dumps(r["arguments"], ensure_ascii=False)) if r["arguments"] else ""
-        explanation = html.escape(str(r["explanation"]) or "")
-        context = html.escape((r["context"] or "")[:160])
-        risk = r["risk_score"]
-        risk_str = f"{risk:.2f}" if isinstance(risk, (int, float)) else "—"
-        error_flag = (
-            f'<div style="color:#b02a37;font-weight:600;">error: {html.escape(str(r["defense_error"]))}</div>'
-            if r["defense_error"]
-            else ""
-        )
-        bg = DECISION_BG.get(r["decision"], "#fff")
-
-        body_rows.append(
-            f"""
-            <tr style="background:{bg};">
-              <td>{r["seq"]}</td>
-              <td>{render_badge(r["decision"])}</td>
-              <td style="text-align:right;">{risk_str}</td>
-              <td>{html.escape(r["tool"] or "")}</td>
-              <td><code style="font-size:11px;">{args}</code></td>
-              <td>{reason_codes}</td>
-              <td style="max-width:320px;font-size:12px;color:#333;">{explanation}{error_flag}</td>
-              <td style="max-width:220px;font-size:11px;color:#777;">{context}</td>
-            </tr>
-            """
-        )
-
-    return f"""
-    <section style="margin-bottom:36px;">
-      <h2 style="margin-bottom:4px;">{html.escape(run_name)}</h2>
-      <div style="margin-bottom:10px;">{count_badges or "<em>aucune decision de defense trouvee</em>"}</div>
-      <table style="border-collapse:collapse;width:100%;font-family:system-ui,sans-serif;font-size:13px;">
-        <thead>
-          <tr style="text-align:left;border-bottom:2px solid #ccc;">
-            <th>#</th><th>Decision</th><th>Risk</th><th>Tool</th>
-            <th>Arguments</th><th>Reason codes</th><th>Explanation</th><th>Contexte</th>
-          </tr>
-        </thead>
-        <tbody>
-          {''.join(body_rows) if body_rows else '<tr><td colspan="8"><em>—</em></td></tr>'}
-        </tbody>
-      </table>
-    </section>
-    """
+    rows = []
+    for row in summary['rows']:
+        details = _escape(json.dumps(row['evidence'], indent=2))
+        values = [row['step'], row['decision'].upper(), row['risk'], row['confidence'], row['tool'],
+                  ', '.join(row['argument_fields']), ', '.join(row['reasons']),
+                  ('DEFENSE ERROR; ' if row['error'] else '') + row['outcome']]
+        cells = ''.join(f'<td>{_escape(v)}</td>' for v in values)
+        rows.append(f'<tr data-decision="{_escape(row["decision"])}">{cells}'
+                    f'<td><details><summary>Evidence</summary><pre>{details}</pre></details></td></tr>')
+    return (f'<section><h2>{_escape(run_name)}</h2><p>{_escape(dict(summary["counts"]))}</p>'
+            '<table><thead><tr><th>Step</th><th>Decision</th><th>Risk</th><th>Confidence</th>'
+            '<th>Action</th><th>Argument fields (values redacted)</th><th>Reasons</th><th>Outcome</th>'
+            '<th>Evidence</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table></section>')
 
 
-def generate_report(artifacts_dir: Path, out_path: Path) -> None:
-    files = find_jsonl_files(artifacts_dir)
-    if not files:
-        print(f"[!] Aucun fichier .jsonl trouve sous {artifacts_dir}")
-
+def generate_report(artifacts_dir: Path, out_path: Path, decisions: Path | None = None) -> None:
+    evidence = {}
+    if decisions:
+        for trace in load_events(decisions):
+            evidence[(trace.get('request_id'), trace.get('step_id'))] = trace
     sections = []
-    global_counts = defaultdict(int)
-
-    for path in files:
-        print(f"Lecture : {path}")
+    for path in find_jsonl_files(artifacts_dir):
         events = load_events(path)
-        summary = summarize_run(events)
-        for dec, n in summary["counts"].items():
-            global_counts[dec] += n
-        run_name = path.stem
-        sections.append(render_run(run_name, summary))
-
-    total_badges = " ".join(
-        f'<span style="margin-right:12px;">{render_badge(dec)} &times; {n}</span>'
-        for dec, n in sorted(global_counts.items())
-    )
-
-    html_doc = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<title>SENTINEL — Trace Report</title>
-</head>
-<body style="margin:24px;font-family:system-ui,sans-serif;color:#111;">
-  <h1>SENTINEL — Rapport de trace ({len(files)} run(s))</h1>
-  <p style="color:#555;">Source : {html.escape(str(artifacts_dir))}</p>
-  <div style="margin-bottom:24px;">{total_badges}</div>
-  {''.join(sections)}
-</body>
-</html>
-"""
+        if any(e.get('type') == 'defense_decision' for e in events):
+            sections.append(render_run(str(path.relative_to(artifacts_dir)), summarize_run(events, evidence)))
+    document = '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Sentinel decision trace</title>
+<style>body{font:14px system-ui;margin:24px;color:#17212b}table{border-collapse:collapse;width:100%}
+td,th{padding:8px;border:1px solid #ccd3da;text-align:left}section{margin:32px 0}
+[data-decision=block]{background:#fee}[data-decision=escalate]{background:#fff5cd}
+[data-decision=allow]{background:#eef9ef}[data-decision=rewrite]{background:#edf3ff}
+pre{white-space:pre-wrap;max-width:420px}input,select{padding:8px}</style>
+<h1>Sentinel action, decision and outcome trace</h1>
+<p>Values and free text are redacted. Expand evidence for provenance, sensitivity, confirmation and transformations.</p>
+<label>Find run or reason <input id="search" type="search"></label>
+<label>Decision <select id="decision"><option value="">All</option><option>allow</option><option>block</option>
+<option>escalate</option><option>rewrite</option></select></label>
+''' + ''.join(sections) + '''
+<script>function filter(){const q=document.querySelector('#search').value.toLowerCase();
+const d=document.querySelector('#decision').value;
+for(const s of document.querySelectorAll('section')){let visible=false;
+for(const r of s.querySelectorAll('tbody tr')){r.hidden=!!((d&&r.dataset.decision!==d)||
+!(s.querySelector('h2').textContent+' '+r.textContent).toLowerCase().includes(q));visible ||= !r.hidden;}s.hidden=!visible;}}
+document.querySelector('#search').addEventListener('input',filter);
+document.querySelector('#decision').addEventListener('change',filter);</script></html>'''
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(html_doc, encoding="utf-8")
-    print(f"\nRapport genere : {out_path}")
+    out_path.write_text(document, encoding='utf-8')
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Genere un rapport HTML a partir des traces SENTINEL")
-    parser.add_argument("--artifacts", type=Path, default=DEFAULT_ARTIFACTS_DIR)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--artifacts', type=Path, default=DEFAULT_ARTIFACTS_DIR)
+    parser.add_argument('--out', type=Path, default=DEFAULT_OUT)
+    parser.add_argument('--decisions', type=Path)
     args = parser.parse_args()
+    generate_report(args.artifacts, args.out, args.decisions)
 
-    generate_report(args.artifacts, args.out)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -19,9 +19,10 @@ class CapabilityResult:
     confirmation_present: bool
     # Is this action consequential (financial, state-changing, etc.)?
     is_consequential: bool
-    # Prerequisite checking (always True in Phase 1; placeholder for Phase 2)
+    # Only successful, earlier calls satisfy tool-level prerequisite rules.
     prerequisites_met: bool = True
     missing_prerequisites: list[str] = field(default_factory=list)
+    unresolved_prerequisites: bool = False
 
 
 def check_capabilities(ctx: NormalizedContext) -> CapabilityResult:
@@ -52,13 +53,40 @@ def check_capabilities(ctx: NormalizedContext) -> CapabilityResult:
             conf_required = True
         else:
             for rule in ctx.policy_rules:
-                if rule.get("kind") == "requires_confirmation":
+                if rule.get("kind") == "requires_confirmation" and (
+                    tool in rule.get("tools", []) if isinstance(rule.get("tools"), list)
+                    else ctx.is_consequential
+                ):
                     conf_required = True
                     break
+
+    succeeded = {c.tool for c in ctx.history_digest.tool_calls
+                 if c.succeeded is True and c.step_id < ctx.step_id
+                 and c.decision in {"allow", "escalate", "rewrite"}}
+    missing: list[str] = []
+    unresolved = False
+    for rule in ctx.policy_rules:
+        if rule.get("kind") != "prerequisite":
+            continue
+        if rule.get("tool") == tool and "requires" in rule:
+            missing.extend(t for t in rule["requires"] if t not in succeeded)
+        elif "tool" not in rule or "requires" not in rule:
+            # The current API strips these rule fields. Do not pretend the
+            # prerequisite was checked; consequential actions still need review.
+            unresolved = True
+            # Fixed tool lifecycles published in the reference tool contract.
+            # This is tool semantics, never scenario-specific inference.
+            predecessor = {"payment_execute": "payment_confirm",
+                           "remediation_execute": "remediation_prepare"}.get(tool)
+            if predecessor and predecessor not in succeeded:
+                missing.append(predecessor)
 
     return CapabilityResult(
         tool_allowed=tool_allowed,
         confirmation_required=conf_required,
         confirmation_present=ctx.is_confirmed,
         is_consequential=ctx.is_consequential,
+        prerequisites_met=not missing,
+        missing_prerequisites=sorted(set(missing)),
+        unresolved_prerequisites=unresolved,
     )

@@ -1,121 +1,209 @@
-"""Data-flow analyzer — tracks source->derived->action->sink flows."""
-
+"""Observed source-to-sink flows, including bounded same-run disclosure history."""
 from __future__ import annotations
 
+import json
+import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
+from sentinel.core.actions import ActionType, Decision, DefenseDecision
 from sentinel.core.provenance import Sensitivity
 
 from context.builder import NormalizedContext
-from context.normalizer import squash
-from dataflow.sinks import SinkCategory, classify_sink, is_dangerous_sink
-from dataflow.transforms import detect_sensitive_value_in_text
+from dataflow.sinks import SINK_FIELDS, SinkCategory, classify_sink
+from dataflow.transforms import compact, text_variants
 from provenance.taint import TaintResult
-
-_MIN_OVERLAP = 32   # minimum chars for overlap to count as a taint signal
 
 
 @dataclass
 class FlowFinding:
-    """A specific information-flow violation detected in the action payload."""
-    value_hint: str        # e.g. 'sensitive content from email-src-123'
-    encoding: str          # 'plain', 'base64', 'hex', etc.
+    value_hint: str
+    encoding: str
     sink_category: SinkCategory
     sensitivity: Sensitivity
-    trust_level_str: str   # TrustLevel.value
+    trust_level_str: str
 
 
 @dataclass
 class DataFlowResult:
-    """Result of data-flow analysis for one candidate action."""
+    # Kept for compatibility with existing layers; now means a forbidden
+    # disclosure, including restricted data at internal and response sinks.
     has_sensitive_to_external_sink: bool
     has_untrusted_to_external_sink: bool
     sink_category: SinkCategory
     findings: list[FlowFinding] = field(default_factory=list)
 
 
+@dataclass
+class _RunFlows:
+    sources: dict[tuple[str, str], Sensitivity] = field(default_factory=dict)
+    outgoing: dict[str, str] = field(default_factory=dict)
+    last_step: int = 0
+    recorded_steps: set[int] = field(default_factory=set)
+
+
+def _leaves(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [s for item in value for s in _leaves(item)]
+    if isinstance(value, dict):
+        return [s for key, item in value.items()
+                if key not in {"id", "_meta", "status", "timestamp", "title"} and not key.endswith("_id")
+                for s in _leaves(item)]
+    return []
+
+
+def _values(text: str) -> set[str]:
+    """General observed text values; no canary prefix or secret-field dictionary."""
+    try:
+        leaves = _leaves(json.loads(text))
+    except (ValueError, TypeError):
+        leaves = [text]
+    values: set[str] = set()
+    for leaf in leaves:
+        # Full scalar, long tokens (including embedded credentials), and content
+        # windows. Short incidental words/numbers are deliberately excluded.
+        values.add(leaf)
+        values.update(re.findall(r"[\w/+@.=-]{12,}", leaf))
+        if len(leaf) > 32:
+            values.update(leaf[i:i + 32] for i in range(0, len(leaf) - 31, 16))
+    return {compact(v) for v in values if len(compact(v)) >= 12}
+
+
+def _source_content(text: str, source_id: str) -> str:
+    """Scope a mixed retrieval to the record named by its provenance, if present."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    matches: list[dict] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            if item.get("id") == source_id:
+                matches.append(item)
+            else:
+                for child in item.values():
+                    visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return json.dumps(matches, ensure_ascii=False) if matches else text
+
+
+def _sink_payload(ctx: NormalizedContext) -> str:
+    if ctx.action_type in {ActionType.RESPOND, ActionType.MEMORY_WRITE}:
+        return ctx.content or ""
+    fields = SINK_FIELDS.get(ctx.tool or "")
+    if fields is not None:
+        parts = [str(ctx.arguments[k]) for k in fields if ctx.arguments.get(k) is not None]
+        return "\n".join(parts)
+    return ctx.action_text_payload
+
+
+def _sink_key(ctx: NormalizedContext) -> str:
+    if ctx.destination:
+        return "destination:" + ctx.destination
+    if ctx.action_type is ActionType.RESPOND:
+        return "user_response"
+    if ctx.action_type is ActionType.MEMORY_WRITE:
+        return "memory"
+    # Repeated notes to the same record can jointly disclose a value.
+    targets = {k: v for k, v in ctx.arguments.items() if k.endswith("_id")}
+    return f"{ctx.tool}:{json.dumps(targets, sort_keys=True)}"
+
+
 class DataFlowAnalyzer:
-    """Deterministic information-flow analysis."""
+    """Bounded process-local history; only observed request data is retained.
 
-    def analyze(
-        self,
-        ctx: NormalizedContext,
-        taint: TaintResult,
-        cfg: dict,
-    ) -> DataFlowResult:
-        """Analyze whether dangerous information flows exist in this action.
+    No evaluator state/labels/files are read. The API serializes decide/record.
+    Fresh instances remain usable by stateless in-process integrations.
+    """
 
-        Checks:
-        1. Sink classification
-        2. Sensitive text overlap with action payload (external sink only)
-        3. Encoding-aware sensitive value detection (canaries from provenance)
-        4. Untrusted text reaching external sink
-        """
-        sink_cfg = cfg.get("sink", {})
-        sink_cat = classify_sink(ctx.tool, sink_cfg)
-        dangerous = is_dangerous_sink(sink_cat)
-        payload = ctx.action_text_payload
-        squashed_payload = squash(payload)
+    def __init__(self) -> None:
+        self._runs: OrderedDict[str, _RunFlows] = OrderedDict()
+
+    def _state(self, ctx: NormalizedContext) -> _RunFlows:
+        state = self._runs.get(ctx.run_id)
+        if state is None or (ctx.step_id == 1 and state.last_step > 1):
+            state = _RunFlows()
+            self._runs[ctx.run_id] = state
+        self._runs.move_to_end(ctx.run_id)
+        while len(self._runs) > 128:
+            self._runs.popitem(last=False)
+        state.last_step = max(state.last_step, ctx.step_id)
+        return state
+
+    def analyze(self, ctx: NormalizedContext, taint: TaintResult, cfg: dict) -> DataFlowResult:
+        state = self._state(ctx)
+        items = list(ctx.conversation)
+        if ctx.observation is not None:
+            items.append(ctx.observation)
+        for item in items:
+            refs = [ctx.provenance_map[p].provenance for p in item.provenance_ids if p in ctx.provenance_map]
+            for prov in refs:
+                if prov.sensitivity.rank >= Sensitivity.CONFIDENTIAL.rank:
+                    content = _source_content(item.content, prov.source_id)
+                    state.sources[(prov.sensitivity.value, content)] = prov.sensitivity
+        # Source sensitivity persists across steps, even when the new memory
+        # record omits it. Comparisons always use the originally observed values.
+        if sum(len(text) for _, text in state.sources) > 200_000:
+            raise ValueError("Sensitive evidence budget exceeded")
+
+        sink = classify_sink(ctx.tool, cfg.get("sink", {}))
+        if ctx.action_type is ActionType.RESPOND:
+            sink = SinkCategory.USER_RESPONSE
+        elif ctx.action_type is ActionType.MEMORY_WRITE:
+            sink = SinkCategory.MEMORY_PERSISTENCE
+        is_sink = sink is not SinkCategory.READ_ONLY
         findings: list[FlowFinding] = []
-
-        has_sensitive_external = False
-        has_untrusted_external = False
-
-        # Only check flows if action reaches an external or dangerous sink
-        if ctx.is_external_destination or (dangerous and sink_cat != SinkCategory.MEMORY_PERSISTENCE):
-            # ── Sensitive text overlap ────────────────────────────────────────
-            for sensitive_text in taint.sensitive_texts:
-                if not sensitive_text:
+        if is_sink:
+            payload = _sink_payload(ctx)
+            prior = state.outgoing.get(_sink_key(ctx), "")
+            if len(prior) + len(payload) > 200_000:
+                raise ValueError("Disclosure scan budget exceeded")
+            scan_payload = payload
+            if ctx.is_external_destination and ctx.destination:
+                scan_payload += "\n" + ctx.destination
+            variants = [(name, compact(value)) for name, value in text_variants(scan_payload)]
+            if prior:
+                variants += [("multi_action:" + name, compact(value))
+                             for name, value in text_variants(prior + "\n" + payload)]
+            for (_, text), sensitivity in state.sources.items():
+                forbidden = sensitivity is Sensitivity.RESTRICTED or ctx.is_external_destination
+                if not forbidden:
                     continue
-                needle = squash(sensitive_text)
-                # Sliding window: look for MIN_OVERLAP-char substrings
-                step = max(1, _MIN_OVERLAP // 2)
-                for i in range(0, max(1, len(needle) - _MIN_OVERLAP + 1), step):
-                    chunk = needle[i: i + _MIN_OVERLAP]
-                    if len(chunk) < 12:
+                values = _values(text)
+                found = next((name for name, value in variants if any(v in value for v in values)), None)
+                if found:
+                    findings.append(FlowFinding("observed sensitive content [redacted]", found, sink,
+                                                sensitivity, taint.worst_trust_level.value))
+                    if len(findings) >= 8:
                         break
-                    if chunk in squashed_payload:
-                        # Find which provenance record this came from
-                        for pid, rec in ctx.provenance_map.items():
-                            p = rec.provenance
-                            if p.sensitivity.rank >= Sensitivity.CONFIDENTIAL.rank:
-                                findings.append(FlowFinding(
-                                    value_hint=f"sensitive content from {p.source_id}",
-                                    encoding="plain",
-                                    sink_category=sink_cat,
-                                    sensitivity=p.sensitivity,
-                                    trust_level_str=p.trust_level.value,
-                                ))
-                                has_sensitive_external = True
-                                break
-                        break  # one finding per sensitive text is enough
+        return DataFlowResult(bool(findings), taint.action_depends_on_untrusted and ctx.is_external_destination,
+                              sink, findings)
 
-            # ── Provenance-based sensitive value detection (canaries) ──────────
-            for pid, rec in ctx.provenance_map.items():
-                p = rec.provenance
-                if p.sensitivity.rank < Sensitivity.CONFIDENTIAL.rank:
-                    continue
-                # Use source_id as the value to check — canary values will appear here
-                # if the agent is exfiltrating them
-                for tag in p.tags:
-                    encoding = detect_sensitive_value_in_text(tag, payload)
-                    if encoding:
-                        findings.append(FlowFinding(
-                            value_hint=f"tagged value from {p.source_id}",
-                            encoding=encoding,
-                            sink_category=sink_cat,
-                            sensitivity=p.sensitivity,
-                            trust_level_str=p.trust_level.value,
-                        ))
-                        has_sensitive_external = True
+    def record(self, ctx: NormalizedContext, decision: DefenseDecision) -> None:
+        """Accumulate allowed disclosures, not blocked proposals or confirmation prompts.
 
-            # ── Untrusted to external ────────────────────────────────────────
-            if taint.action_depends_on_untrusted and ctx.is_external_destination:
-                has_untrusted_external = True
-
-        return DataFlowResult(
-            has_sensitive_to_external_sink=has_sensitive_external,
-            has_untrusted_to_external_sink=has_untrusted_external,
-            sink_category=sink_cat,
-            findings=findings,
-        )
+        An escalation may execute immediately after approval, so retaining that
+        candidate is conservative. The request contract does not report whether
+        non-tool escalations were accepted. This can overestimate prior disclosure.
+        """
+        if ctx.is_confirmation_request or decision.decision is Decision.BLOCK:
+            return
+        if classify_sink(ctx.tool, {}) is SinkCategory.READ_ONLY:
+            return
+        state = self._state(ctx)
+        if ctx.step_id in state.recorded_steps:
+            return
+        payload = _sink_payload(ctx)
+        key = _sink_key(ctx)
+        combined = state.outgoing.get(key, "") + "\n" + payload
+        if sum(len(v) for k, v in state.outgoing.items() if k != key) + len(combined) > 200_000:
+            raise ValueError("Disclosure history budget exceeded")
+        state.outgoing[key] = combined
+        state.recorded_steps.add(ctx.step_id)

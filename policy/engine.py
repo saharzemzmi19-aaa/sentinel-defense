@@ -26,6 +26,7 @@ class PolicyResult:
     violation_severity: str   # 'critical' | 'high' | 'medium' | 'low' | ''
     findings: list[str] = field(default_factory=list)
     rule_ids_violated: list[str] = field(default_factory=list)
+    forbidden_effect: bool = False
 
 
 def evaluate_policy(
@@ -69,31 +70,28 @@ def evaluate_policy(
         data_flow_allowed = False
         violation_severity = _worst("critical", violation_severity)
         findings.append(
-            f"Sensitive content detected in payload to external destination '{ctx.destination}'"
+            "Sensitive content detected at a disallowed sink [destination redacted]"
         )
         rule_ids.extend(_rule_ids_of_kind(ctx, "data_flow"))
         for ff in flow.findings:
             findings.append(f"  [{ff.encoding}] {ff.value_hint} → {ff.sink_category}")
 
     # ── 4. Adversary-controlled source → consequential action ─────────────────
-    if taint.action_depends_on_adversary and capabilities.is_consequential:
+    if (taint.action_depends_on_adversary and capabilities.is_consequential
+            and not capabilities.confirmation_present and not ctx.is_confirmation_request):
         has_violation = True
         violation_severity = _worst("critical", violation_severity)
         findings.append(
             "Consequential action depends on adversary-controlled content"
         )
 
-    # ── 5. Adversary-controlled source → any action ───────────────────────────
-    elif taint.action_depends_on_adversary:
-        has_violation = True
-        violation_severity = _worst("high", violation_severity)
-        findings.append("Action depends on adversary-controlled content")
-
     # ── 6. Untrusted source → external + consequential ────────────────────────
     if (
         taint.action_depends_on_untrusted
         and ctx.is_external_destination
         and capabilities.is_consequential
+        and not capabilities.confirmation_present
+        and not ctx.is_confirmation_request
         and not taint.action_depends_on_adversary  # already reported above
     ):
         has_violation = True
@@ -103,15 +101,18 @@ def evaluate_policy(
             "Untrusted content reaching external destination in a consequential action"
         )
 
-    # ── 7. Memory write from untrusted ────────────────────────────────────────
-    from sentinel.core.actions import ActionType
-    if ctx.action_type is ActionType.MEMORY_WRITE and taint.action_depends_on_untrusted:
+    if not capabilities.prerequisites_met:
         has_violation = True
         violation_severity = _worst("high", violation_severity)
-        findings.append(
-            "MEMORY_WRITE action contains content derived from untrusted source "
-            "(trust is NOT upgraded by storing to memory)"
-        )
+        findings.append("Missing successful prerequisite tool execution")
+        rule_ids.extend(_rule_ids_of_kind(ctx, "prerequisite"))
+
+    forbidden_effect = bool(_predicted_effects(ctx) & set(ctx.forbidden_effects))
+    if forbidden_effect:
+        has_violation = True
+        violation_severity = _worst("critical", violation_severity)
+        findings.append("Action would cause a declared forbidden effect")
+        rule_ids.extend(_rule_ids_of_kind(ctx, "forbidden_effect"))
 
     return PolicyResult(
         tool_allowed=capabilities.tool_allowed,
@@ -122,6 +123,7 @@ def evaluate_policy(
         violation_severity=violation_severity,
         findings=findings,
         rule_ids_violated=rule_ids,
+        forbidden_effect=forbidden_effect,
     )
 
 
@@ -136,3 +138,19 @@ def _worst(a: str, b: str) -> str:
 
 def _rule_ids_of_kind(ctx: NormalizedContext, kind: str) -> list[str]:
     return [r.get("id", "") for r in ctx.policy_rules if r.get("kind") == kind]
+
+
+def _predicted_effects(ctx: NormalizedContext) -> set[str]:
+    """Effects visible from official tool arguments, not hidden world state."""
+    effects = {ctx.tool} if ctx.tool else set()
+    if ctx.tool == "email_send":
+        effects.add("external_message_send" if ctx.is_external_destination else "internal_message_send")
+    if ctx.tool == "email_draft":
+        effects.add("draft_created")
+    if ctx.tool == "ticket_update" and ctx.arguments.get("status") in {"closed", "resolved"}:
+        effects.add("ticket_close")
+    if ctx.tool == "incident_update" and ctx.arguments.get("status") == "closed":
+        effects.add("incident_close")
+    # remediation_execute supplies only an ID; its eventual effect cannot be
+    # reconstructed without prior preparation arguments (not in HistoryDigest).
+    return effects

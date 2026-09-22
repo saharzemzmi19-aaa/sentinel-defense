@@ -1,6 +1,4 @@
-"""Risk fusion — combines multiple weak signals into a continuous score
-to refine ESCALATE decisions, reducing unnecessary escalations (UER)
-without weakening hard security guarantees (ASR/CVR stay untouched).
+"""Risk fusion supplies descriptive scores; it never overrides policy gates.
 """
 
 from __future__ import annotations
@@ -46,8 +44,7 @@ def _sensitivity_risk(taint: TaintResult) -> float:
 
 
 def _scale_risk(ctx: NormalizedContext) -> float:
-    """Larger amounts carry more real risk. Calibrated so that
-    amount=5000 (the original test's baseline) still escalates."""
+    """Heuristic transaction scale; this is not a calibrated probability."""
     amount = ctx.arguments.get("amount")
     if isinstance(amount, (int, float)):
         if amount <= 500:
@@ -67,7 +64,7 @@ def _reversibility_risk(ctx: NormalizedContext, flow: DataFlowResult) -> float:
 
 
 def _history_risk(ctx: NormalizedContext) -> float:
-    if ctx.history_digest.confirmations_granted:
+    if ctx.is_confirmed:
         return 0.2
     return 0.4
 
