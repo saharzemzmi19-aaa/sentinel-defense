@@ -1,7 +1,41 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / tooling caches
 .pytest_cache/
-# Generated evaluation runs (raw synthetic traces remain available locally).
-# Curated scorecards, environment and redacted evidence are kept at audit root.
-results/audit/*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated observability reports
+observability/*.html
+
+# Generated evaluation artifacts
+artifacts/
+
+# Local logs
+*.log
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+report/TECHNICAL_REPORT.backup.md
+
+report/TECHNICAL_REPORT.backup.md
